@@ -147,7 +147,7 @@ namespace YLib.NetWorking.Sockets
                         break;
                     }
 
-                    if (_sock.Poll(100000, SelectMode.SelectRead))
+                    if (_sock.Poll(10000, SelectMode.SelectRead))
                     {
                         SocketRecv();
                     }
