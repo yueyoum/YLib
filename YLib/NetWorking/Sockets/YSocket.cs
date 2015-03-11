@@ -175,6 +175,17 @@ namespace YLib.NetWorking.Sockets
         private static class RecvQueue
         {
             private static Queue<byte[]> q = new Queue<byte[]>();
+            public static int Count
+            {
+                get
+                { 
+                    lock (q)
+                    {
+                        return q.Count;
+                    }
+                }
+            }
+
             public static byte[] Dequeue()
             {
                 lock (q)
@@ -208,6 +219,17 @@ namespace YLib.NetWorking.Sockets
         private static class SendQueue
         {
             private static Queue<byte[]> q = new Queue<byte[]>();
+            public static int Count
+            {
+                get
+                { 
+                    lock (q)
+                    {
+                        return q.Count;
+                    }
+                }
+            }
+
             public static byte[] Dequeue()
             {
                 lock (q)
@@ -304,13 +326,18 @@ namespace YLib.NetWorking.Sockets
                 return;
             }
 
+            if (OnConnect != null)
+            {
+                OnConnect();
+            }
+
             var _send = new Thread(soWorker.RunSend);
             var _recv = new Thread(soWorker.RunRecv);
             _send.Start();
             _recv.Start();
         }
 
-        public static bool Update()
+        private static bool CheckRecvQueue()
         {
             var data = RecvQueue.Dequeue();
             if (data == null)
@@ -328,10 +355,20 @@ namespace YLib.NetWorking.Sockets
             return true;
         }
 
+        // Loop For Normal Use
         public static void Loop()
         {
-            while (Update())
+            while (CheckRecvQueue())
             {
+            }
+        }
+
+        // Update For Unity3d Use
+        public static void Update()
+        {
+            if (RecvQueue.Count > 0)
+            {
+                CheckRecvQueue();
             }
         }
 
