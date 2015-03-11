@@ -2,6 +2,7 @@
 using System.Threading;
 using System.Net;
 using System.Net.Sockets;
+using System.Collections.Generic;
 
 namespace YLib.NetWorking.Sockets
 {
@@ -17,6 +18,8 @@ namespace YLib.NetWorking.Sockets
 
             private bool _die = false;
 
+            public string ErrorReason = "";
+
             public bool IsConnected
             {
                 get { return (_sock != null); }
@@ -29,7 +32,7 @@ namespace YLib.NetWorking.Sockets
                 _headerLength = headerLength;
             }
 
-            private void SocketConnect()
+            public void SocketConnect()
             {
                 if (IsConnected)
                 {
@@ -42,20 +45,17 @@ namespace YLib.NetWorking.Sockets
                 try
                 {
                     _sock.Connect(endPoint);
-                    if (OnConnect != null)
-                    {
-                        OnConnect();
-                    }
                 }
                 catch (Exception e)
                 {
                     _sock = null;
-                    Close(e.ToString());
+                    ErrorReason = e.ToString();
                 }
             }
 
             public void SocketClose()
             {
+                SendQueue.Enqueue(null);
                 _die = true;
                 if (_sock != null)
                 {
@@ -79,7 +79,8 @@ namespace YLib.NetWorking.Sockets
                 }
                 catch (Exception e)
                 {
-                    Close(e.ToString());
+                    ErrorReason = e.ToString();
+                    RecvQueue.Enqueue(null);
                 }
             }
 
@@ -94,67 +95,150 @@ namespace YLib.NetWorking.Sockets
 
                     if (rec == 0)
                     {
-                        return new byte[0];
+                        return null;
                     }
 
                     count += rec;
                 }
-
                 return data;
             }
 
             private void SocketRecv()
             {
                 var lenBuf = RecvHandler(_headerLength);
-                if (lenBuf.Length == 0)
+                if (lenBuf == null)
                 {
-                    Close("Recv len 0 bytes. Remote Close the connection");
+                    ErrorReason = "Recv len 0 bytes. Remote Close the connection";
+                    RecvQueue.Enqueue(null);
                     return;
                 }
 
                 int len = IPAddress.NetworkToHostOrder(BitConverter.ToInt32(lenBuf, 0));
                 var data = RecvHandler(len);
-                if (data.Length == 0)
+                if (data == null)
                 {
-                    Close("Recv data 0 bytes. Remote Close the connection");
+                    ErrorReason = "Recv data 0 bytes. Remote Close the connection";
+                    RecvQueue.Enqueue(null);
                     return;
                 }
 
-
-                if (OnData != null)
-                {
-                    OnData(data);
-                }
+                RecvQueue.Enqueue(data);
             }
 
 
-            public void Run()
+            public void RunRecv()
             {
-                if (!IsConnected)
-                {
-                    SocketConnect();
-                }
-
                 if (!IsConnected)
                 {
                     return;
                 }
 
-                while (true)
+                while (!_die)
                 {
+                    if (_sock.Poll(2000, SelectMode.SelectRead))
+                    {
+                        if (_die)
+                        {
+                            break;
+                        }
+                        SocketRecv();
+                    }
+                }
+            }
+
+            public void RunSend()
+            {
+                if (!IsConnected)
+                {
+                    return;
+                }
+
+                while (!_die)
+                {
+                    var data = SendQueue.Dequeue();
                     if (_die)
                     {
                         break;
                     }
 
-                    if (_sock.Poll(10000, SelectMode.SelectRead))
+                    if (data == null)
                     {
-                        SocketRecv();
+                        break;
                     }
-                }
 
+                    SocketSend(data);
+                }
             }
         }
+
+
+        private static class RecvQueue
+        {
+            private static Queue<byte[]> q = new Queue<byte[]>();
+            public static byte[] Dequeue()
+            {
+                lock (q)
+                {
+                    while (q.Count == 0)
+                    {
+                        Monitor.Wait(q);
+                    }
+                    return q.Dequeue();
+                }
+            }
+
+            public static void Enqueue(byte[] data)
+            {
+                lock (q)
+                {
+                    q.Enqueue(data);
+                    Monitor.PulseAll(q);
+                }
+            }
+
+            public static void Clear()
+            {
+                lock (q)
+                {
+                    q.Clear();
+                }
+            }
+        }
+
+        private static class SendQueue
+        {
+            private static Queue<byte[]> q = new Queue<byte[]>();
+            public static byte[] Dequeue()
+            {
+                lock (q)
+                {
+                    while (q.Count == 0)
+                    {
+                        Monitor.Wait(q);
+                    }
+                    return q.Dequeue();
+                }
+            }
+
+            public static void Enqueue(byte[] data)
+            {
+                lock (q)
+                {
+                    q.Enqueue(data);
+                    Monitor.PulseAll(q);
+                }
+            }
+
+            public static void Clear()
+            {
+                lock (q)
+                {
+                    q.Clear();
+                }
+            }
+        }
+
+
 
         private static int _headerLen = 4;
 
@@ -168,8 +252,6 @@ namespace YLib.NetWorking.Sockets
 
 
 
-        private delegate void DataToSendEventHandler(byte[] data);
-        private static event DataToSendEventHandler DataToSend = null;
 
         public delegate void OnDataEventHandler(byte[] data);
         public static event OnDataEventHandler OnData = null;
@@ -183,59 +265,85 @@ namespace YLib.NetWorking.Sockets
         private static SocketWorker soWorker = null;
 
 
-        private static void CloseSocketWorker()
+        private static string CloseSocketWorker()
         {
-            DataToSend = null;
+            string reason = "";
             if (soWorker != null)
             {
+                reason = soWorker.ErrorReason;
                 soWorker.SocketClose();
                 soWorker = null;
             }
+            return reason;
         }
 
         public static void Close()
         {
-            CloseSocketWorker();
-            if (OnDisconnect != null)
-            {
-                OnDisconnect("");
-            }
-        }
-
-        public static void Close(string reason)
-        {
-            CloseSocketWorker();
+            var reason = CloseSocketWorker();
             if (OnDisconnect != null)
             {
                 OnDisconnect(reason);
             }
         }
 
-
         public static void Start()
         {
+            SendQueue.Clear();
+            RecvQueue.Clear();
+
             if (soWorker != null)
             {
                 CloseSocketWorker();
             }
 
             soWorker = new SocketWorker(Ip, Port, HeaderLength);
-            DataToSend += soWorker.SocketSend;
-
-            var th = new Thread(soWorker.Run);
-            th.Start();
-        }
-
-        public static void Send(byte[] data)
-        {
-            if (DataToSend == null)
+            soWorker.SocketConnect();
+            if (!soWorker.IsConnected)
             {
                 Close();
                 return;
             }
-            DataToSend(data);
+
+            var _send = new Thread(soWorker.RunSend);
+            var _recv = new Thread(soWorker.RunRecv);
+            _send.Start();
+            _recv.Start();
         }
 
+        public static bool Update()
+        {
+            var data = RecvQueue.Dequeue();
+            if (data == null)
+            {
+                // closed!
+                Close();
+                return false;
+            }
+
+            if (OnData != null)
+            {
+                OnData(data);
+            }
+
+            return true;
+        }
+
+        public static void Loop()
+        {
+            while (Update())
+            {
+            }
+        }
+
+        public static void Send(byte[] data)
+        {
+            if (soWorker == null)
+            {
+                Close();
+                return;
+            }
+            SendQueue.Enqueue(data);
+        }
     }
 }
 
